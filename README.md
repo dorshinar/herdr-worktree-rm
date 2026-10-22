@@ -78,7 +78,12 @@ says so and plain Enter refuses a dirty checkout, so press `f` if you know you
 want it gone.
 
 The popup closes immediately; the removal continues in the background and a
-notification reports the result.
+notification reports the result, quoting git's message on failure.
+
+If git unregisters the worktree but cannot delete every file (for example
+because an install was still writing into it), the plugin retries once with
+`--force` to clear the leftovers, which is what Herdr's own dialog offers in
+that state.
 
 You can also run it from a shell without a keybinding:
 

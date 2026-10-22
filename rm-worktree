@@ -158,14 +158,11 @@ confirm() {
 
 # ---------- detached worker ----------
 
-run() {
-  shift 2 || true
-  local label out job i
-  label=$(workspace_json | jq -r '.label')
-  out=$(mktemp)
+remove_with_spinner() {  # remove_with_spinner [--force]; output in $out
+  local job i
+  : >"$out"
   "$h" worktree remove --workspace "$ws" "$@" >"$out" 2>&1 &
   job=$!
-
   local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
   i=0
   while kill -0 "$job" 2>/dev/null; do
@@ -174,13 +171,35 @@ run() {
       --token "removing=${frames[i % 10]} removing…" --ttl-ms 2000 >/dev/null 2>&1
     sleep 0.15
   done
+  wait "$job"
+}
 
-  if wait "$job"; then
+error_field() {  # error_field <code|message>
+  jq -r ".error.$1 // empty" <"$out" 2>/dev/null || true
+}
+
+run() {
+  shift 2 || true
+  local label
+  label=$(workspace_json | jq -r '.label')
+  out=$(mktemp)
+
+  local ok=0
+  if remove_with_spinner "$@"; then
+    ok=1
+  elif [[ $(error_field code) == worktree_remove_failed && $(error_field message) == *"is not a working tree"* ]]; then
+    # Git already unregistered the checkout and only leftover files remain
+    # (same state Herdr's own dialog resolves with a forced retry).
+    remove_with_spinner --force && ok=1
+  fi
+
+  if (( ok )); then
     "$h" notification show "Worktree removed" --body "$label" --sound done
   else
+    local msg
+    msg=$(error_field message); [[ -n $msg ]] || msg=$(tr -d '\n' <"$out" | head -c 200)
     "$h" workspace report-metadata "$ws" --source "$source_id" --clear-token removing >/dev/null 2>&1
-    "$h" notification show "Worktree removal failed" \
-      --body "$label: $(tr -d '\n' <"$out" | head -c 200)" --sound request
+    "$h" notification show "Worktree removal failed" --body "$label: $msg" --sound request
   fi
   rm -f "$out"
 }
