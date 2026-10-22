@@ -14,7 +14,7 @@ This plugin does the same removal, but:
 
 1. asks for confirmation in a small popup,
 2. runs `herdr worktree remove` in a detached background process,
-3. animates a `⠹ removing…` spinner on the workspace's sidebar row,
+3. renames the workspace to ~~its name~~ `deleting…` so the sidebar row shows what is happening,
 4. shows a notification when it finishes or fails.
 
 Other workspaces and agents stay usable the whole time.
@@ -37,17 +37,6 @@ key = "shift+alt+d"
 type = "plugin_action"
 command = "dorshinar.worktree-rm.remove"
 description = "delete worktree checkout (background)"
-```
-
-To see the spinner, add the `$removing` token to your Space rows. Setting
-`rows` replaces the default layout, so include the defaults too:
-
-```toml
-[ui.sidebar.spaces]
-rows = [
-  ["state_icon", "workspace", { token = "$removing", fg = "#fc0", dim = false }],
-  ["branch", "git_status"],
-]
 ```
 
 Then `herdr server reload-config`.
@@ -98,9 +87,9 @@ herdr plugin action invoke dorshinar.worktree-rm.remove
 - `confirm` mode runs inside the popup, draws the dialog, reads a key or a
   mouse click, and starts `run` mode in its own session (`setsid`, or `perl`
   on macOS) so it survives the popup's terminal closing.
-- `run` mode calls `herdr worktree remove` and, while it runs, updates a
-  display-only workspace metadata token every 150 ms with a 2 s TTL. The token
-  expires on its own if the worker dies.
+- `run` mode renames the workspace to its struck-through name plus
+  `deleting…`, calls `herdr worktree remove`, and renames it back if the
+  removal fails. On success the workspace closes, name and all.
 
 ## License
 

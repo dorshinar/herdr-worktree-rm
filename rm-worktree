@@ -2,12 +2,11 @@
 # Modes:
 #   action  - plugin action: open the confirm popup for the current workspace
 #   confirm - popup: render buttons, read the choice, spawn the detached worker
-#   run     - detached worker: remove the worktree, animate a sidebar spinner
+#   run     - detached worker: rename the row to "deleting…", remove the worktree
 set -u
 
 h=${HERDR_BIN_PATH:-herdr}
 self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-source_id=user:worktree-rm
 mode=${1:-action}
 
 ws=${WORKTREE_RM_WORKSPACE:-${2:-${HERDR_WORKSPACE_ID:-${HERDR_ACTIVE_WORKSPACE_ID:-}}}}
@@ -158,20 +157,17 @@ confirm() {
 
 # ---------- detached worker ----------
 
-remove_with_spinner() {  # remove_with_spinner [--force]; output in $out
-  local job i
-  : >"$out"
-  "$h" worktree remove --workspace "$ws" "$@" >"$out" 2>&1 &
-  job=$!
-  local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
-  i=0
-  while kill -0 "$job" 2>/dev/null; do
-    i=$((i + 1))
-    "$h" workspace report-metadata "$ws" --source "$source_id" --seq "$i" \
-      --token "removing=${frames[i % 10]} removing…" --ttl-ms 2000 >/dev/null 2>&1
-    sleep 0.15
+strikethrough() {  # strikethrough <text>: combining long stroke overlay after each char
+  local text=$1 i out=""
+  for (( i = 0; i < ${#text}; i++ )); do
+    out+="${text:i:1}"$'\xcc\xb6'
   done
-  wait "$job"
+  printf '%s' "$out"
+}
+
+remove_once() {  # remove_once [--force]; output in $out
+  : >"$out"
+  "$h" worktree remove --workspace "$ws" "$@" >"$out" 2>&1
 }
 
 error_field() {  # error_field <code|message>
@@ -184,13 +180,16 @@ run() {
   label=$(workspace_json | jq -r '.label')
   out=$(mktemp)
 
+  # The sidebar row shows the struck-through name while git works.
+  "$h" workspace rename "$ws" "$(strikethrough "$label") deleting…" >/dev/null 2>&1 || true
+
   local ok=0
-  if remove_with_spinner "$@"; then
+  if remove_once "$@"; then
     ok=1
   elif [[ $(error_field code) == worktree_remove_failed && $(error_field message) == *"is not a working tree"* ]]; then
     # Git already unregistered the checkout and only leftover files remain
     # (same state Herdr's own dialog resolves with a forced retry).
-    remove_with_spinner --force && ok=1
+    remove_once --force && ok=1
   fi
 
   if (( ok )); then
@@ -198,7 +197,7 @@ run() {
   else
     local msg
     msg=$(error_field message); [[ -n $msg ]] || msg=$(tr -d '\n' <"$out" | head -c 200)
-    "$h" workspace report-metadata "$ws" --source "$source_id" --clear-token removing >/dev/null 2>&1
+    "$h" workspace rename "$ws" "$label" >/dev/null 2>&1 || true
     "$h" notification show "Worktree removal failed" --body "$label: $msg" --sound request
   fi
   rm -f "$out"
