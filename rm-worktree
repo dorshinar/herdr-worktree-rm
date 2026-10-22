@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Modes:
+#   action  - plugin action: open the confirm popup for the current workspace
+#   confirm - popup: ask y / f / cancel, then spawn the detached worker
+#   run     - detached worker: remove the worktree, animate a sidebar spinner
+set -u
+
+h=${HERDR_BIN_PATH:-herdr}
+self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+source_id=user:worktree-rm
+mode=${1:-action}
+
+ws=${WORKTREE_RM_WORKSPACE:-${2:-${HERDR_WORKSPACE_ID:-${HERDR_ACTIVE_WORKSPACE_ID:-}}}}
+if [[ -z $ws ]]; then
+  "$h" notification show "Worktree remove" --body "No workspace in context" --sound request
+  exit 1
+fi
+
+workspace_json() {
+  "$h" workspace list | jq -c --arg w "$ws" \
+    '.result.workspaces[] | select(.workspace_id == $w)'
+}
+
+case $mode in
+  action)
+    exec "$h" plugin pane open --plugin "${HERDR_PLUGIN_ID:-dorshinar.worktree-rm}" \
+      --entrypoint confirm --env "WORKTREE_RM_WORKSPACE=$ws"
+    ;;
+
+  confirm)
+    info=$(workspace_json)
+    label=$(jq -r '.label' <<<"$info")
+    path=$(jq -r '.worktree.checkout_path // ""' <<<"$info")
+    linked=$(jq -r '.worktree.is_linked_worktree // false' <<<"$info")
+
+    if [[ $linked != true ]]; then
+      printf "'%s' is not a linked worktree workspace.\n\nPress any key to close." "$label"
+      read -rsn1
+      exit 1
+    fi
+
+    printf "Delete worktree checkout '%s'?\n  %s\n\n" "$label" "$path"
+    printf "[y] delete   [f] force (discards uncommitted changes)   [other] cancel: "
+    read -rsn1 key
+    echo
+    case $key in
+      y|Y) force= ;;
+      f|F) force=--force ;;
+      *)   exit 0 ;;
+    esac
+    # Detach so the worker survives the popup's terminal going away.
+    ( nohup bash "$self" run "$ws" $force >/dev/null 2>&1 & )
+    exit 0
+    ;;
+
+  run)
+    shift 2 || true
+    label=$(workspace_json | jq -r '.label')
+    out=$(mktemp)
+    "$h" worktree remove --workspace "$ws" "$@" >"$out" 2>&1 &
+    job=$!
+
+    frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+    i=0
+    while kill -0 "$job" 2>/dev/null; do
+      i=$((i + 1))
+      "$h" workspace report-metadata "$ws" --source "$source_id" --seq "$i" \
+        --token "removing=${frames[i % 10]} removing…" --ttl-ms 2000 >/dev/null 2>&1
+      sleep 0.15
+    done
+
+    if wait "$job"; then
+      "$h" notification show "Worktree removed" --body "$label" --sound done
+    else
+      "$h" workspace report-metadata "$ws" --source "$source_id" --clear-token removing >/dev/null 2>&1
+      "$h" notification show "Worktree removal failed" \
+        --body "$label: $(tr -d '\n' <"$out" | head -c 200)" --sound request
+    fi
+    rm -f "$out"
+    ;;
+
+  *)
+    echo "usage: rm-worktree action|confirm|run [workspace_id] [--force]" >&2
+    exit 2
+    ;;
+esac
