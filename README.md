@@ -54,16 +54,31 @@ Then `herdr server reload-config`.
 
 ## Use
 
-Focus the worktree workspace and press the key. In the popup:
+Focus the worktree workspace and press the key. The popup mirrors Herdr's own
+delete dialog:
 
-| Key   | Effect                                                  |
-| ----- | ------------------------------------------------------- |
-| `y`   | remove the checkout                                     |
-| `f`   | remove with `--force` (discards uncommitted changes)    |
-| other | cancel                                                  |
+```text
+ delete worktree checkout?
+ This removes the checkout folder:
+ ~/Code/wiz/wiz-worktrees/wiz/scratch-1022
+ The branch is not deleted. The Herdr workspace will close.
+ Dirty or untracked files will be permanently deleted.
 
-The popup closes immediately; the removal continues in the background. A dirty
-checkout fails without `f`, and the failure notification tells you so.
+   ↵ delete anyway      esc cancel
+```
+
+| Input                    | Effect                                                      |
+| ------------------------ | ----------------------------------------------------------- |
+| Enter, `y`, click button | remove; on a dirty checkout the button reads "delete anyway" and forces |
+| `f`                      | remove with `--force` regardless of the dirty check         |
+| Esc, `q`, click cancel   | cancel                                                      |
+
+The dirty check is a `git status` capped at 1.5 s. When it times out the dialog
+says so and plain Enter refuses a dirty checkout, so press `f` if you know you
+want it gone.
+
+The popup closes immediately; the removal continues in the background and a
+notification reports the result.
 
 You can also run it from a shell without a keybinding:
 
@@ -75,8 +90,9 @@ herdr plugin action invoke dorshinar.worktree-rm.remove
 
 - `action` mode opens the plugin's popup pane, passing the workspace id through
   `--env`, so the action targets the workspace it was invoked on.
-- `confirm` mode runs inside the popup, reads one key, and spawns `run` mode
-  under `nohup` in a subshell so it outlives the popup's terminal.
+- `confirm` mode runs inside the popup, draws the dialog, reads a key or a
+  mouse click, and starts `run` mode in its own session (`setsid`, or `perl`
+  on macOS) so it survives the popup's terminal closing.
 - `run` mode calls `herdr worktree remove` and, while it runs, updates a
   display-only workspace metadata token every 150 ms with a 2 s TTL. The token
   expires on its own if the worker dies.

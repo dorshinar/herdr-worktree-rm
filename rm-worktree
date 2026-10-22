@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Modes:
 #   action  - plugin action: open the confirm popup for the current workspace
-#   confirm - popup: ask y / f / cancel, then spawn the detached worker
+#   confirm - popup: render buttons, read the choice, spawn the detached worker
 #   run     - detached worker: remove the worktree, animate a sidebar spinner
 set -u
 
@@ -21,64 +21,177 @@ workspace_json() {
     '.result.workspaces[] | select(.workspace_id == $w)'
 }
 
+# ---------- confirm popup ----------
+# Mirrors Herdr's native "delete worktree checkout?" overlay: red heading,
+# dim path, two filled buttons. Enter/click = primary, Esc/click = cancel.
+
+ESC=$'\e'
+R="$ESC[0m"; BOLD="$ESC[1m"; DIM="$ESC[2m"; RED="$ESC[31m"
+BTN_PRIMARY="$ESC[1;97;41m"      # white on red
+BTN_CANCEL="$ESC[1;97;100m"      # white on grey
+BTN_ROW=7
+PRIMARY_COL=2;  PRIMARY_W=18
+CANCEL_COL=22;  CANCEL_W=12
+
+cols=72
+tty_setup() {
+  cols=$(tput cols 2>/dev/null || echo 72)
+  printf '%s[?25l%s[?1000h%s[?1006h' "$ESC" "$ESC" "$ESC"   # hide cursor, mouse clicks
+  trap 'printf "%s[?1006l%s[?1000l%s[?25h%s" "$ESC" "$ESC" "$ESC" "$R"' EXIT
+}
+
+pretty_path() {
+  local p=$1 max=$2
+  [[ $p == "$HOME"* ]] && p="~${p#"$HOME"}"
+  if (( ${#p} > max )); then
+    local keep=$(( (max - 1) / 2 ))
+    p="${p:0:keep}…${p: -keep}"
+  fi
+  printf '%s' "$p"
+}
+
+centered() {  # centered <width> <text>
+  local w=$1 t=$2 n=${#2}
+  local left=$(( (w - n) / 2 )) right=$(( w - n - (w - n) / 2 ))
+  printf '%*s%s%*s' "$left" '' "$t" "$right" ''
+}
+
+render() {  # render <dirty|clean|unknown>
+  local dirty=$1 primary=" ↵ remove"
+  printf '%s[2J%s[H' "$ESC" "$ESC"
+  printf ' %s%sdelete worktree checkout?%s\n' "$BOLD" "$RED" "$R"
+  printf ' This removes the checkout folder:\n'
+  printf ' %s%s%s\n' "$DIM" "$path_disp" "$R"
+  printf ' The branch is not deleted. The Herdr workspace will close.\n'
+  case $dirty in
+    dirty)   printf ' %sDirty or untracked files will be permanently deleted.%s\n' "$RED" "$R"; primary="↵ delete anyway" ;;
+    unknown) printf ' %sCould not check for dirty files. Press f to force.%s\n' "$DIM" "$R" ;;
+  esac
+  printf '%s[%d;%dH%s%s%s' "$ESC" "$BTN_ROW" "$PRIMARY_COL" "$BTN_PRIMARY" "$(centered $PRIMARY_W "$primary")" "$R"
+  printf '%s[%d;%dH%s%s%s' "$ESC" "$BTN_ROW" "$CANCEL_COL" "$BTN_CANCEL" "$(centered $CANCEL_W "esc cancel")" "$R"
+}
+
+# Reads the rest of a CSI sequence after ESC: "[" then bytes until a final
+# byte in the 0x40-0x7E range. Prints "" for a bare Esc.
+read_csi() {
+  local c seq=""
+  IFS= read -rsn1 -t 0.05 c || { printf ''; return; }
+  seq=$c
+  [[ $c == "[" ]] || { printf '%s' "$seq"; return; }
+  while IFS= read -rsn1 -t 0.05 c; do
+    seq+=$c
+    [[ $c == [@-~] ]] && break
+  done
+  printf '%s' "$seq"
+}
+
+# Prints one of: primary force cancel none
+read_choice() {
+  local k rest
+  IFS= read -rsn1 k || { echo cancel; return; }
+  case $k in
+    "")        echo primary; return ;;           # Enter
+    y|Y)       echo primary; return ;;
+    f|F)       echo force; return ;;
+    q|Q|c|C)   echo cancel; return ;;
+    "$ESC")
+      rest=$(read_csi)
+      case $rest in
+        "") echo cancel; return ;;               # bare Esc
+        "[<0;"*"M")                               # SGR left-button press
+          local body=${rest#"[<0;"}; body=${body%M}
+          local x=${body%%;*} y=${body#*;}
+          if (( y == BTN_ROW )); then
+            if (( x >= PRIMARY_COL && x < PRIMARY_COL + PRIMARY_W )); then echo primary; return; fi
+            if (( x >= CANCEL_COL && x < CANCEL_COL + CANCEL_W )); then echo cancel; return; fi
+          fi ;;
+      esac ;;
+  esac
+  echo none
+}
+
+# Start the worker in its own session so it survives the popup's pty closing.
+detach() {
+  trap '' HUP
+  if command -v setsid >/dev/null 2>&1; then
+    setsid -f "$@" >/dev/null 2>&1 </dev/null
+  elif command -v perl >/dev/null 2>&1; then
+    ( perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$@" >/dev/null 2>&1 </dev/null & )
+  else
+    ( nohup "$@" >/dev/null 2>&1 </dev/null & )
+  fi
+}
+
+confirm() {
+  local info label path linked dirty=unknown st
+  info=$(workspace_json)
+  label=$(jq -r '.label' <<<"$info")
+  path=$(jq -r '.worktree.checkout_path // ""' <<<"$info")
+  linked=$(jq -r '.worktree.is_linked_worktree // false' <<<"$info")
+
+  tty_setup
+  if [[ $linked != true ]]; then
+    printf '%s[2J%s[H %s%s%s is not a linked worktree workspace.' "$ESC" "$ESC" "$BOLD" "$label" "$R"
+    printf '%s[%d;%dH%s%s%s' "$ESC" "$BTN_ROW" "$PRIMARY_COL" "$BTN_CANCEL" "$(centered $CANCEL_W "esc close")" "$R"
+    read -rsn1
+    return 1
+  fi
+
+  path_disp=$(pretty_path "$path" $(( cols - 4 )))
+  if [[ -d $path ]] && st=$(timeout 1.5 git -C "$path" status --porcelain --untracked-files=normal 2>/dev/null); then
+    [[ -n $st ]] && dirty=dirty || dirty=clean
+  fi
+
+  local choice
+  while :; do
+    render "$dirty"
+    choice=$(read_choice)
+    [[ $choice != none ]] && break
+  done
+
+  case $choice in
+    primary) [[ $dirty == dirty ]] && detach bash "$self" run "$ws" --force || detach bash "$self" run "$ws" ;;
+    force)   detach bash "$self" run "$ws" --force ;;
+  esac
+  return 0
+}
+
+# ---------- detached worker ----------
+
+run() {
+  shift 2 || true
+  local label out job i
+  label=$(workspace_json | jq -r '.label')
+  out=$(mktemp)
+  "$h" worktree remove --workspace "$ws" "$@" >"$out" 2>&1 &
+  job=$!
+
+  local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+  i=0
+  while kill -0 "$job" 2>/dev/null; do
+    i=$((i + 1))
+    "$h" workspace report-metadata "$ws" --source "$source_id" --seq "$i" \
+      --token "removing=${frames[i % 10]} removing…" --ttl-ms 2000 >/dev/null 2>&1
+    sleep 0.15
+  done
+
+  if wait "$job"; then
+    "$h" notification show "Worktree removed" --body "$label" --sound done
+  else
+    "$h" workspace report-metadata "$ws" --source "$source_id" --clear-token removing >/dev/null 2>&1
+    "$h" notification show "Worktree removal failed" \
+      --body "$label: $(tr -d '\n' <"$out" | head -c 200)" --sound request
+  fi
+  rm -f "$out"
+}
+
 case $mode in
   action)
     exec "$h" plugin pane open --plugin "${HERDR_PLUGIN_ID:-dorshinar.worktree-rm}" \
       --entrypoint confirm --env "WORKTREE_RM_WORKSPACE=$ws"
     ;;
-
-  confirm)
-    info=$(workspace_json)
-    label=$(jq -r '.label' <<<"$info")
-    path=$(jq -r '.worktree.checkout_path // ""' <<<"$info")
-    linked=$(jq -r '.worktree.is_linked_worktree // false' <<<"$info")
-
-    if [[ $linked != true ]]; then
-      printf "'%s' is not a linked worktree workspace.\n\nPress any key to close." "$label"
-      read -rsn1
-      exit 1
-    fi
-
-    printf "Delete worktree checkout '%s'?\n  %s\n\n" "$label" "$path"
-    printf "[y] delete   [f] force (discards uncommitted changes)   [other] cancel: "
-    read -rsn1 key
-    echo
-    case $key in
-      y|Y) force= ;;
-      f|F) force=--force ;;
-      *)   exit 0 ;;
-    esac
-    # Detach so the worker survives the popup's terminal going away.
-    ( nohup bash "$self" run "$ws" $force >/dev/null 2>&1 & )
-    exit 0
-    ;;
-
-  run)
-    shift 2 || true
-    label=$(workspace_json | jq -r '.label')
-    out=$(mktemp)
-    "$h" worktree remove --workspace "$ws" "$@" >"$out" 2>&1 &
-    job=$!
-
-    frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
-    i=0
-    while kill -0 "$job" 2>/dev/null; do
-      i=$((i + 1))
-      "$h" workspace report-metadata "$ws" --source "$source_id" --seq "$i" \
-        --token "removing=${frames[i % 10]} removing…" --ttl-ms 2000 >/dev/null 2>&1
-      sleep 0.15
-    done
-
-    if wait "$job"; then
-      "$h" notification show "Worktree removed" --body "$label" --sound done
-    else
-      "$h" workspace report-metadata "$ws" --source "$source_id" --clear-token removing >/dev/null 2>&1
-      "$h" notification show "Worktree removal failed" \
-        --body "$label: $(tr -d '\n' <"$out" | head -c 200)" --sound request
-    fi
-    rm -f "$out"
-    ;;
-
+  confirm) confirm ;;
+  run)     run "$@" ;;
   *)
     echo "usage: rm-worktree action|confirm|run [workspace_id] [--force]" >&2
     exit 2

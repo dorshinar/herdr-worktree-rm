@@ -13,8 +13,8 @@ command = ["bash", "rm-worktree", "action"]
 
 [[panes]]
 id = "confirm"
-title = "Delete worktree checkout"
+title = "worktree-rm"
 placement = "popup"
 width = 74
-height = 9
+height = 10
 command = ["bash", "rm-worktree", "confirm"]
