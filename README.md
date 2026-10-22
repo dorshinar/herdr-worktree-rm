@@ -33,7 +33,7 @@ Bind the action to a key in `~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]
-key = "alt+d"
+key = "shift+alt+d"
 type = "plugin_action"
 command = "dorshinar.worktree-rm.remove"
 description = "delete worktree checkout (background)"
